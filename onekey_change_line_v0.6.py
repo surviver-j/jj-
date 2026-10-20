@@ -100,6 +100,34 @@ class FTP:
                 try: self.c.mkd(cur); self.c.cwd(cur)
                 except ftplib.all_errors as e: raise RuntimeError(f"无法创建/进入 FTP 目录 {cur}: {e}")
         self.c.cwd("/")
+    def list_dirs(self, remote=""):
+        """列出 FTP 当前目录或指定相对目录的子目录；兼容不支持 MLSD 的服务器。"""
+        original = self.c.pwd()
+        try:
+            if remote:
+                self.c.cwd(remote)
+            found = []
+            try:
+                for name, facts in self.c.mlsd():
+                    if name not in (".", "..") and facts.get("type", "").lower() == "dir":
+                        found.append(name)
+            except (ftplib.error_perm, AttributeError, NotImplementedError):
+                current = self.c.pwd()
+                for item in self.c.nlst():
+                    name = item.rstrip("/").split("/")[-1]
+                    if not name or name in (".", ".."):
+                        continue
+                    try:
+                        self.c.cwd(item)
+                        found.append(name)
+                        self.c.cwd(current)
+                    except ftplib.all_errors:
+                        try: self.c.cwd(current)
+                        except ftplib.all_errors: pass
+            return sorted(set(found), key=str.casefold)
+        finally:
+            try: self.c.cwd(original)
+            except ftplib.all_errors: pass
     def put(self, local, remote):
         folder, name = remote.rsplit("/", 1)
         if folder: self.mkdirs(folder)
@@ -135,10 +163,16 @@ class App:
             ttk.Entry(fb,textvariable=var,width=w,show=show).grid(row=0,column=i*2+1,padx=4,pady=4)
         ttk.Button(fb,text="测试连接",command=self.test).grid(row=0,column=8,padx=4)
         ttk.Button(fb,text="保存连接信息",command=self.save_ftp).grid(row=0,column=9,padx=4)
-        pb=ttk.LabelFrame(a,text="项目 / 工单 / 工站",padding=8); pb.pack(fill="x",pady=8)
-        for i,(lab,var) in enumerate([("项目",self.project),("工单/版本",self.order),("工站",self.station)]):
-            ttk.Label(pb,text=lab).grid(row=0,column=i*2,sticky="w")
-            ttk.Entry(pb,textvariable=var,width=22).grid(row=0,column=i*2+1,padx=5,pady=4)
+        pb=ttk.LabelFrame(a,text="项目 / 工单 / 工站（连接 FTP 后可下拉选择，也可输入新名称）",padding=8); pb.pack(fill="x",pady=8)
+        self.project_box = ttk.Combobox(pb,textvariable=self.project,width=20,state="normal")
+        self.order_box = ttk.Combobox(pb,textvariable=self.order,width=20,state="normal")
+        self.station_box = ttk.Combobox(pb,textvariable=self.station,width=20,state="normal")
+        for col,lab,box in [(0,"项目",self.project_box),(2,"工单/版本",self.order_box),(4,"工站",self.station_box)]:
+            ttk.Label(pb,text=lab).grid(row=0,column=col,sticky="w")
+            box.grid(row=0,column=col+1,padx=5,pady=4,sticky="ew")
+        ttk.Button(pb,text="刷新 FTP 目录",command=self.refresh_remote_tree).grid(row=0,column=6,padx=4)
+        self.project_box.bind("<<ComboboxSelected>>",lambda _e:self.load_remote_orders())
+        self.order_box.bind("<<ComboboxSelected>>",lambda _e:self.load_remote_stations())
         ttk.Label(pb,text="部署目录").grid(row=1,column=0,sticky="w")
         ttk.Entry(pb,textvariable=self.target).grid(row=1,column=1,columnspan=4,sticky="ew",pady=5)
         ttk.Button(pb,text="选择目录",command=self.pick_target).grid(row=1,column=5,padx=4)
@@ -194,7 +228,55 @@ class App:
     def test(self):
         def work():
             with self.ftp_args(): pass
-            self.log("FTP 连接成功。"); self.root.after(0,lambda:messagebox.showinfo("成功","FTP 连接成功。"))
+            self.log("FTP 连接成功。")
+            self.root.after(0,lambda:messagebox.showinfo("成功","FTP 连接成功，正在读取项目目录。"))
+            self.root.after(0,self.refresh_remote_tree)
+        self.bg(work)
+    def refresh_remote_tree(self):
+        """连接 FTP 后读取项目目录；目录选择与手工输入均保留。"""
+        def work():
+            with self.ftp_args() as c:
+                projects = c.list_dirs()
+            def update():
+                self.project_box["values"] = projects
+                if self.project.get() not in projects and projects:
+                    self.project.set(projects[0])
+                self.load_remote_orders()
+                self.log(f"已读取 FTP 项目目录：{len(projects)} 个。")
+            self.root.after(0,update)
+        self.bg(work)
+    def load_remote_orders(self):
+        project = self.project.get().strip()
+        if not project or "/" in project or "\\" in project or ".." in project:
+            self.order_box["values"] = []
+            self.station_box["values"] = []
+            return
+        def work():
+            with self.ftp_args() as c:
+                orders = c.list_dirs(project)
+            def update():
+                self.order_box["values"] = orders
+                if self.order.get() not in orders and orders:
+                    self.order.set(orders[0])
+                self.load_remote_stations()
+                self.log(f"项目 {project} 下读取到 {len(orders)} 个工单/版本目录。")
+            self.root.after(0,update)
+        self.bg(work)
+    def load_remote_stations(self):
+        project, order = self.project.get().strip(), self.order.get().strip()
+        if (not project or not order or any(x in project+order for x in ("/","\\",".."))):
+            self.station_box["values"] = []
+            return
+        remote = project + "/" + order
+        def work():
+            with self.ftp_args() as c:
+                stations = c.list_dirs(remote)
+            def update():
+                self.station_box["values"] = stations
+                if self.station.get() not in stations and stations:
+                    self.station.set(stations[0])
+                self.log(f"目录 {remote} 下读取到 {len(stations)} 个工站目录。")
+            self.root.after(0,update)
         self.bg(work)
     def upload(self):
         src=filedialog.askdirectory(title="选择标准测试软件目录")
