@@ -143,7 +143,8 @@ class App:
         fs = read_json(FTPSET, {})
         self.host=tk.StringVar(value=fs.get("host","")); self.port=tk.StringVar(value=str(fs.get("port",21)))
         self.user=tk.StringVar(value=fs.get("user","")); self.pw=tk.StringVar()
-        self.project=tk.StringVar(value="SIM8950"); self.order=tk.StringVar(value="3100008779")
+        self.remote_root=tk.StringVar(value=fs.get("remote_root","数据中转/周俊/日海"))
+        self.project=tk.StringVar(value="SIM8950"); self.order=tk.StringVar(value="30008085")
         self.station=tk.StringVar(value="BT"); self.target=tk.StringVar(value=str(Path.home()/"TestSoftware"))
         self.tool=tk.StringVar(value="通用测试工具"); self.rel=tk.StringVar(); self.section=tk.StringVar()
         self.key=tk.StringVar(); self.pname=tk.StringVar(); self.pvalue=tk.StringVar()
@@ -173,10 +174,13 @@ class App:
         ttk.Button(pb,text="刷新 FTP 目录",command=self.refresh_remote_tree).grid(row=0,column=6,padx=4)
         self.project_box.bind("<<ComboboxSelected>>",lambda _e:self.load_remote_orders())
         self.order_box.bind("<<ComboboxSelected>>",lambda _e:self.load_remote_stations())
-        ttk.Label(pb,text="部署目录").grid(row=1,column=0,sticky="w")
-        ttk.Entry(pb,textvariable=self.target).grid(row=1,column=1,columnspan=4,sticky="ew",pady=5)
-        ttk.Button(pb,text="选择目录",command=self.pick_target).grid(row=1,column=5,padx=4)
-        self.preview=ttk.Label(pb); self.preview.grid(row=2,column=0,columnspan=6,sticky="w")
+        ttk.Label(pb,text="FTP 起始目录").grid(row=1,column=0,sticky="w")
+        ttk.Entry(pb,textvariable=self.remote_root,width=45).grid(row=1,column=1,columnspan=4,sticky="ew",pady=5)
+        ttk.Label(pb,text="项目目录之前的路径，例如 数据中转/周俊/日海").grid(row=1,column=5,columnspan=2,sticky="w",padx=4)
+        ttk.Label(pb,text="部署目录").grid(row=2,column=0,sticky="w")
+        ttk.Entry(pb,textvariable=self.target).grid(row=2,column=1,columnspan=4,sticky="ew",pady=5)
+        ttk.Button(pb,text="选择目录",command=self.pick_target).grid(row=2,column=5,padx=4)
+        self.preview=ttk.Label(pb); self.preview.grid(row=3,column=0,columnspan=7,sticky="w")
         for v in (self.project,self.order,self.station): v.trace_add("write",lambda *_:self.update_preview())
         self.update_preview()
         ab=ttk.Frame(a); ab.pack(fill="x",pady=8)
@@ -216,14 +220,19 @@ class App:
     def base(self):
         parts=[self.project.get().strip(),self.order.get().strip(),self.station.get().strip()]
         if not all(parts) or any("/" in p or "\\" in p or ".." in p for p in parts): raise ValueError("项目、工单、工站不能为空，且不能包含路径分隔符或 ..")
-        return "/".join(parts)
+        root = self.remote_root.get().strip().strip("/")
+        if "\\\\" in root or ".." in root: raise ValueError("FTP 起始目录格式不正确。")
+        return "/".join([x for x in (root, *parts) if x])
     def update_preview(self):
-        if hasattr(self,"preview"): self.preview.configure(text="FTP 路径："+"/".join([self.project.get(),self.order.get(),self.station.get(),"package.zip"]))
+        if hasattr(self,"preview"):
+            root = self.remote_root.get().strip().strip("/")
+            parts = [x.strip() for x in (self.project.get(),self.order.get(),self.station.get(),"package.zip") if x.strip()]
+            self.preview.configure(text="FTP 远端路径："+"/".join([x for x in (root, *parts) if x]))
     def pick_target(self):
         d=filedialog.askdirectory(title="选择部署目录")
         if d:self.target.set(d)
     def save_ftp(self):
-        write_json(FTPSET,{"host":self.host.get().strip(),"port":self.port.get() or "21","user":self.user.get().strip()})
+        write_json(FTPSET,{"host":self.host.get().strip(),"port":self.port.get() or "21","user":self.user.get().strip(),"remote_root":self.remote_root.get().strip().strip("/")})
         messagebox.showinfo("完成",f"已保存服务器、端口和账号（不保存密码）：\n{FTPSET}")
     def test(self):
         def work():
@@ -236,7 +245,7 @@ class App:
         """连接 FTP 后读取项目目录；目录选择与手工输入均保留。"""
         def work():
             with self.ftp_args() as c:
-                projects = c.list_dirs()
+                projects = c.list_dirs(self.remote_root.get().strip().strip("/"))
             def update():
                 self.project_box["values"] = projects
                 if self.project.get() not in projects and projects:
@@ -253,7 +262,7 @@ class App:
             return
         def work():
             with self.ftp_args() as c:
-                orders = c.list_dirs(project)
+                orders = c.list_dirs("/".join(x for x in (self.remote_root.get().strip().strip("/"), project) if x))
             def update():
                 self.order_box["values"] = orders
                 if self.order.get() not in orders and orders:
@@ -267,7 +276,7 @@ class App:
         if (not project or not order or any(x in project+order for x in ("/","\\",".."))):
             self.station_box["values"] = []
             return
-        remote = project + "/" + order
+        remote = "/".join(x for x in (self.remote_root.get().strip().strip("/"), project, order) if x)
         def work():
             with self.ftp_args() as c:
                 stations = c.list_dirs(remote)
