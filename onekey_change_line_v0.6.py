@@ -159,9 +159,10 @@ class App:
 
     def build(self):
         ttk.Label(self.root,text=APP,font=("Microsoft YaHei UI",16,"bold")).pack(anchor="w",padx=12,pady=8)
-        nb=ttk.Notebook(self.root); nb.pack(fill="both",expand=True,padx=10,pady=5)
+        nb=ttk.Notebook(self.root); nb.pack(fill="both",expand=True,padx=10,pady=5); self.nb=nb
         a=ttk.Frame(nb,padding=10); b=ttk.Frame(nb,padding=10); c=ttk.Frame(nb,padding=10); d=ttk.Frame(nb,padding=10)
         nb.add(a,text="FTP 换线部署"); nb.add(b,text="本机 INI 参数"); nb.add(c,text="运行日志"); nb.add(d,text="启动程序配置")
+        self.launch_tab=d
         self.build_launcher_tab(d)
         self.logbox=tk.Text(c,state="disabled",wrap="word"); self.logbox.pack(fill="both",expand=True)
         fb=ttk.LabelFrame(a,text="FTP 连接",padding=8); fb.pack(fill="x")
@@ -232,6 +233,12 @@ class App:
         ttk.Label(parent,text="项目 + 工站作为配置键；程序路径、工作目录和快捷方式名称保存在本机 launcher_profiles.json。若目录中有多个 EXE，扫描后不会自动选中任何一个。",wraplength=900).grid(row=9,column=0,columnspan=4,sticky="w",pady=4)
         for col in (1,3): parent.columnconfigure(col,weight=1)
         parent.rowconfigure(4,weight=1)
+
+    def after_deploy_success(self,target,backup,digest):
+        messagebox.showinfo("部署完成",f"部署和文件校验成功。\\n目录：{target}\\n备份：{backup if backup else '首次部署'}\\nSHA-256：{digest}\\n\\n接下来可配置本工站的桌面启动快捷方式。")
+        if messagebox.askyesno("配置启动程序","是否现在扫描刚部署的目录并选择主测试程序？"):
+            self.nb.select(self.launch_tab)
+            self.scan_exes()
 
     def scan_exes(self):
         root=Path(self.target.get().strip())
@@ -492,7 +499,7 @@ class App:
                         for info in z.infolist():
                             if not info.is_dir() and sha256(target/info.filename)!=hashlib.sha256(z.read(info.filename)).hexdigest():raise IOError("部署校验失败："+info.filename)
                     self.log("部署成功："+str(target))
-                    self.root.after(0,lambda:messagebox.showinfo("完成",f"部署和文件校验成功。\n目录：{target}\n备份：{backup if existed else '首次部署'}\nSHA-256：{digest}\n如需本机参数，请进入 INI 参数页应用。"))
+                    self.root.after(0,lambda:self.after_deploy_success(target,backup if existed else None,digest))
                 except Exception:
                     self.log("部署失败，执行回滚。")
                     if target.exists():shutil.rmtree(target)
