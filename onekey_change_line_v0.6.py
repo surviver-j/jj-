@@ -2,7 +2,7 @@
 """换线软件同步助手 v0.6
 Python 3.10+；标准库实现。打包：pyinstaller --noconsole --onefile --name 换线软件同步助手_v0.6 onekey_change_line_v0.6.py
 """
-import os, sys, json, ftplib, hashlib, shutil, socket, tempfile, zipfile, re, threading
+import os, sys, json, base64, subprocess, ftplib, hashlib, shutil, socket, tempfile, zipfile, re, threading
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -14,6 +14,7 @@ HOME.mkdir(parents=True, exist_ok=True)
 RULES = HOME / "ini_rules.json"
 PROFILES = HOME / "local_profiles.json"
 FTPSET = HOME / "ftp_settings.json"
+LAUNCHERS = HOME / "launcher_profiles.json"
 
 def read_json(path, default):
     try: return json.loads(path.read_text(encoding="utf-8"))
@@ -148,14 +149,20 @@ class App:
         self.tool=tk.StringVar(value="通用测试工具"); self.rel=tk.StringVar(); self.section=tk.StringVar()
         self.key=tk.StringVar(); self.pname=tk.StringVar(); self.pvalue=tk.StringVar()
         self.rules=read_json(RULES, {}); self.profiles=read_json(PROFILES, {})
+        self.launchers=read_json(LAUNCHERS, {})
+        self.launch_project=tk.StringVar(); self.launch_station=tk.StringVar()
+        self.launch_name=tk.StringVar(value="BT测试工具"); self.launch_exe=tk.StringVar()
+        self.launch_workdir=tk.StringVar()
+        self.exe_candidates=[]
         self.rows=[]; self.build()
         self.log(f"启动完成，本机标识：{socket.gethostname()}")
 
     def build(self):
         ttk.Label(self.root,text=APP,font=("Microsoft YaHei UI",16,"bold")).pack(anchor="w",padx=12,pady=8)
         nb=ttk.Notebook(self.root); nb.pack(fill="both",expand=True,padx=10,pady=5)
-        a=ttk.Frame(nb,padding=10); b=ttk.Frame(nb,padding=10); c=ttk.Frame(nb,padding=10)
-        nb.add(a,text="FTP 换线部署"); nb.add(b,text="本机 INI 参数"); nb.add(c,text="运行日志")
+        a=ttk.Frame(nb,padding=10); b=ttk.Frame(nb,padding=10); c=ttk.Frame(nb,padding=10); d=ttk.Frame(nb,padding=10)
+        nb.add(a,text="FTP 换线部署"); nb.add(b,text="本机 INI 参数"); nb.add(c,text="运行日志"); nb.add(d,text="启动程序配置")
+        self.build_launcher_tab(d)
         self.logbox=tk.Text(c,state="disabled",wrap="word"); self.logbox.pack(fill="both",expand=True)
         fb=ttk.LabelFrame(a,text="FTP 连接",padding=8); fb.pack(fill="x")
         for i,(lab,var,w,show) in enumerate([("服务器",self.host,22,None),("端口",self.port,6,None),("账号",self.user,16,None),("密码",self.pw,16,"*")]):
@@ -195,6 +202,130 @@ class App:
         buttons=ttk.Frame(b); buttons.pack(fill="x",pady=7)
         for label,fn in [("保存规则和本机值",self.save_rule),("读取本机配置",self.load_profile),("应用到部署目录",self.apply_profile),("删除规则",self.delete_rule)]:
             ttk.Button(buttons,text=label,command=fn).pack(side="left",padx=4)
+
+    def build_launcher_tab(self, parent):
+        ttk.Label(parent, text="部署并解压完成后，在此扫描测试软件目录，人工确认主程序，再创建桌面快捷方式。不会复制 EXE。", wraplength=900).grid(row=0,column=0,columnspan=4,sticky="w",pady=(0,8))
+        ttk.Label(parent,text="项目").grid(row=1,column=0,sticky="w",padx=3,pady=4)
+        ttk.Entry(parent,textvariable=self.launch_project,width=24).grid(row=1,column=1,sticky="ew",padx=3,pady=4)
+        ttk.Label(parent,text="工站").grid(row=1,column=2,sticky="w",padx=3,pady=4)
+        ttk.Entry(parent,textvariable=self.launch_station,width=24).grid(row=1,column=3,sticky="ew",padx=3,pady=4)
+        ttk.Label(parent,text="扫描目录").grid(row=2,column=0,sticky="w",padx=3,pady=4)
+        ttk.Entry(parent,textvariable=self.target).grid(row=2,column=1,columnspan=2,sticky="ew",padx=3,pady=4)
+        ttk.Button(parent,text="选择目录",command=self.pick_target).grid(row=2,column=3,sticky="ew",padx=3,pady=4)
+        bar=ttk.Frame(parent); bar.grid(row=3,column=0,columnspan=4,sticky="w",pady=5)
+        ttk.Button(bar,text="扫描 EXE",command=self.scan_exes).pack(side="left",padx=3)
+        ttk.Button(bar,text="手动选择 EXE",command=self.pick_exe).pack(side="left",padx=3)
+        ttk.Button(bar,text="读取已保存配置",command=self.load_launcher_profile).pack(side="left",padx=3)
+        self.exe_tree=ttk.Treeview(parent,columns=("path",),show="headings",height=9,selectmode="browse")
+        self.exe_tree.heading("path",text="扫描到的 EXE（请明确选中正确的主测试程序）")
+        self.exe_tree.column("path",width=800,anchor="w")
+        self.exe_tree.grid(row=4,column=0,columnspan=4,sticky="nsew",pady=4)
+        self.exe_tree.bind("<<TreeviewSelect>>",self.select_exe_candidate)
+        ttk.Label(parent,text="主程序 EXE").grid(row=5,column=0,sticky="w",padx=3,pady=4)
+        ttk.Entry(parent,textvariable=self.launch_exe).grid(row=5,column=1,columnspan=3,sticky="ew",padx=3,pady=4)
+        ttk.Label(parent,text="快捷方式名称").grid(row=6,column=0,sticky="w",padx=3,pady=4)
+        ttk.Entry(parent,textvariable=self.launch_name).grid(row=6,column=1,sticky="ew",padx=3,pady=4)
+        ttk.Label(parent,text="工作目录（起始位置）").grid(row=6,column=2,sticky="w",padx=3,pady=4)
+        ttk.Entry(parent,textvariable=self.launch_workdir).grid(row=6,column=3,sticky="ew",padx=3,pady=4)
+        ttk.Button(parent,text="选择工作目录",command=self.pick_workdir).grid(row=7,column=3,sticky="e",padx=3,pady=4)
+        ttk.Button(parent,text="创建桌面快捷方式并保存配置",command=self.create_launcher).grid(row=8,column=0,columnspan=2,sticky="w",padx=3,pady=8)
+        ttk.Label(parent,text="项目 + 工站作为配置键；程序路径、工作目录和快捷方式名称保存在本机 launcher_profiles.json。若目录中有多个 EXE，扫描后不会自动选中任何一个。",wraplength=900).grid(row=9,column=0,columnspan=4,sticky="w",pady=4)
+        for col in (1,3): parent.columnconfigure(col,weight=1)
+        parent.rowconfigure(4,weight=1)
+
+    def scan_exes(self):
+        root=Path(self.target.get().strip())
+        if not str(root).strip() or not root.is_dir():
+            messagebox.showwarning("提示","请先选择一个存在的本机部署目录。")
+            return
+        candidates=[]
+        for current,dirs,files in os.walk(root):
+            dirs[:]=[d for d in dirs if d not in ("__pycache__","_backup")]
+            for name in files:
+                if name.lower().endswith(".exe"):
+                    candidates.append(str((Path(current)/name).resolve()))
+        candidates.sort(key=str.casefold)
+        self.exe_candidates=candidates
+        self.exe_tree.delete(*self.exe_tree.get_children())
+        for i,p in enumerate(candidates):
+            self.exe_tree.insert("","end",iid=str(i),values=(p,))
+        # Intentionally do not select the first result: the operator must choose the real test program.
+        self.launch_exe.set("")
+        self.launch_workdir.set("")
+        self.log(f"扫描启动程序目录：{root}，发现 EXE {len(candidates)} 个；未自动选择主程序。")
+        if not candidates:
+            messagebox.showinfo("扫描完成","未找到 EXE。请确认部署目录，或使用“手动选择 EXE”。")
+        else:
+            messagebox.showinfo("扫描完成",f"发现 {len(candidates)} 个 EXE。请在列表中明确选择主测试程序；程序不会自动选第一个。")
+
+    def select_exe_candidate(self,_event=None):
+        selected=self.exe_tree.selection()
+        if not selected:return
+        values=self.exe_tree.item(selected[0],"values")
+        if not values:return
+        path=values[0]
+        self.launch_exe.set(path)
+        self.launch_workdir.set(str(Path(path).parent))
+
+    def pick_exe(self):
+        initial=self.target.get().strip()
+        p=filedialog.askopenfilename(title="明确选择主测试程序",initialdir=initial if Path(initial).is_dir() else str(Path.home()),filetypes=[("Windows 应用程序","*.exe")])
+        if p:
+            self.launch_exe.set(str(Path(p).resolve()))
+            if not self.launch_workdir.get().strip():self.launch_workdir.set(str(Path(p).resolve().parent))
+
+    def pick_workdir(self):
+        initial=self.launch_workdir.get().strip() or self.target.get().strip()
+        d=filedialog.askdirectory(title="选择测试程序工作目录",initialdir=initial if Path(initial).is_dir() else str(Path.home()))
+        if d:self.launch_workdir.set(str(Path(d).resolve()))
+
+    def load_launcher_profile(self):
+        project=self.launch_project.get().strip();station=self.launch_station.get().strip()
+        if not project or not station:
+            messagebox.showwarning("提示","请先填写项目和工站，再读取对应配置。")
+            return
+        key=project+"||"+station
+        profile=self.launchers.get(key)
+        if not profile:
+            messagebox.showinfo("未找到","当前项目/工站还没有保存启动程序配置。")
+            return
+        self.launch_name.set(profile.get("shortcut_name",""))
+        self.launch_exe.set(profile.get("exe_path",""))
+        self.launch_workdir.set(profile.get("working_directory",""))
+        messagebox.showinfo("读取完成","已读取该项目/工站的启动程序配置。请确认路径仍然有效。")
+
+    def create_launcher(self):
+        project=self.launch_project.get().strip();station=self.launch_station.get().strip()
+        exe=Path(self.launch_exe.get().strip())
+        workdir=Path(self.launch_workdir.get().strip())
+        name=self.launch_name.get().strip()
+        if not project or not station:
+            messagebox.showwarning("提示","项目和工站都必须填写，才能保存对应关系。");return
+        if not name or any(ch in name for ch in '<>:"/\\|?*') or name.endswith((".", " ")):
+            messagebox.showwarning("提示","快捷方式名称不能为空，且不能包含非法文件名字符。");return
+        if not exe.is_file() or exe.suffix.lower()!=".exe":
+            messagebox.showwarning("提示","请先从扫描结果中明确选择一个有效的 EXE，或手动选择主程序。");return
+        if not workdir.is_dir():
+            messagebox.showwarning("提示","工作目录不存在，请重新选择。");return
+        if not messagebox.askyesno("确认创建快捷方式",f"项目：{project}\n工站：{station}\n主程序：{exe}\n工作目录：{workdir}\n桌面名称：{name}\n\n将创建桌面快捷方式，不会复制或移动程序文件。继续？"):return
+        try:
+            desktop=Path(os.path.expandvars("%USERPROFILE%"))/"Desktop"
+            # Use the Windows Shell COM object through PowerShell. Encode the payload to avoid quoting/path issues.
+            payload=json.dumps({"Exe":str(exe.resolve()),"WorkingDirectory":str(workdir.resolve()),"ShortcutName":name},ensure_ascii=False).encode("utf-8")
+            payload64=base64.b64encode(payload).decode("ascii")
+            ps="$data=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+payload64+"')) | ConvertFrom-Json; $shell=New-Object -ComObject WScript.Shell; $desktop=[Environment]::GetFolderPath('Desktop'); $linkPath=Join-Path $desktop ($data.ShortcutName + '.lnk'); $link=$shell.CreateShortcut($linkPath); $link.TargetPath=$data.Exe; $link.WorkingDirectory=$data.WorkingDirectory; $link.Save(); Write-Output $linkPath"
+            encoded=base64.b64encode(ps.encode("utf-16le")).decode("ascii")
+            proc=subprocess.run(["powershell.exe","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-EncodedCommand",encoded],capture_output=True,text=True,timeout=30,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+            if proc.returncode!=0:raise RuntimeError((proc.stderr or proc.stdout or "PowerShell 创建快捷方式失败。").strip())
+            key=project+"||"+station
+            self.launchers[key]={"project":project,"station":station,"exe_path":str(exe.resolve()),"shortcut_name":name,"working_directory":str(workdir.resolve()),"updated_at":datetime.now().isoformat(timespec="seconds")}
+            write_json(LAUNCHERS,self.launchers)
+            shortcut_path=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else str(desktop/(name+".lnk"))
+            self.log(f"桌面快捷方式已创建：{shortcut_path}；配置键：{key}")
+            messagebox.showinfo("完成",f"桌面快捷方式已创建：\n{shortcut_path}\n\n项目/工站启动配置已保存：\n{LAUNCHERS}")
+        except Exception as e:
+            self.log("创建快捷方式失败："+str(e))
+            messagebox.showerror("创建失败",str(e))
 
     def log(self,msg):
         if hasattr(self,"logbox"):
